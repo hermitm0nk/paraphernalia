@@ -12,6 +12,10 @@ Sync KOReader vocabulary builder words to Anki with dictionary definitions from 
 uv run koreader2anki/sync_to_anki.py
 ```
 
+### [koreader-plugins](koreader-plugins/README.md)
+
+Custom Lua plugins for KOReader on Kindle — a clock dashboard and automatic vocabulary cloud sync.
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — project and package manager

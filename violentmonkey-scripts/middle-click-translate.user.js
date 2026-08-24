@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Middle-Click Selection Translator (Keep Punctuation)
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Translates selected text on middle-click. Removes line breaks/tabs but keeps punctuation. Auto-detects the source language from the selected text.
 // @author       Gemini
 // @match file:///*
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
-// @connect      translate.google.com
+// @connect      clients5.google.com
 // ==/UserScript==
 
 (function() {
@@ -79,23 +79,46 @@
     function translateText(text, x, y) {
         if (!text) return;
         showPopup("Translating...", x, y);
-        const url = `https://translate.google.com/m?sl=auto&tl=en&q=${encodeURIComponent(text)}`;
+        // Endpoint used by Google's Dictionary browser extension. Unlike the
+        // mobile Translate page, this returns structured JSON rather than HTML.
+        const url = `https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=en&q=${encodeURIComponent(text)}`;
 
         GM_xmlhttpRequest({
             method: "GET",
             url: url,
+            timeout: 15000,
             onload: function(response) {
                 try {
                     const status = Number(response.status);
                     if (status && (status < 200 || status >= 300)) {
-                        throw new Error(`Google web translation failed with HTTP ${status}`);
+                        throw new Error(`Google translation failed with HTTP ${status}`);
                     }
 
-                    const document = new DOMParser().parseFromString(response.responseText, "text/html");
-                    const result = document.querySelector(".result-container");
-                    const translation = result ? result.textContent.trim() : "";
+                    const body = (response.responseText || "").replace(/^\uFEFF/, "").trim();
+                    if (!body.startsWith("[") && !body.startsWith("{")) {
+                        throw new Error("Google returned a non-JSON response");
+                    }
+
+                    const data = JSON.parse(body);
+                    let translation = "";
+
+                    // Current response: [["translated text", "source-language"]]
+                    if (Array.isArray(data)) {
+                        translation = data
+                            .filter(item => Array.isArray(item) && typeof item[0] === "string")
+                            .map(item => item[0])
+                            .join("");
+                    // Older response: { sentences: [{ trans: "..." }] }
+                    } else if (data && Array.isArray(data.sentences)) {
+                        translation = data.sentences
+                            .filter(item => item && typeof item.trans === "string")
+                            .map(item => item.trans)
+                            .join("");
+                    }
+
+                    translation = cleanText(translation);
                     if (!translation) {
-                        throw new Error("Google web translation returned no result");
+                        throw new Error("Google returned no translation");
                     }
                     showPopup(translation, x, y);
                 } catch (err) {
@@ -106,7 +129,7 @@
             },
             onerror: function(err) {
                 showPopup("Network error.", x, y);
-                console.error("Google web translation network error:", err);
+                console.error("Google translation network error:", err);
             },
             ontimeout: function() {
                 showPopup("Translation timed out.", x, y);

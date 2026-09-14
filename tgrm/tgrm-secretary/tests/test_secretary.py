@@ -289,6 +289,93 @@ class TestReplyDelay(Base):
         self.assertEqual(self.pi_cmds, [])
         self.assertEqual([m["role"] for m in self.history()], ["VISITOR"])
 
+class TestMultiChatIsolation(Base):
+    def mstate(self):
+        return {"owner_id": 111, "chats": {}, "pending": {}}
+
+    def test_two_chats_separate_histories_and_replies(self):
+        self.cfg.reply_delay_seconds = 60
+        st = self.mstate()
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=1001, name="Ann",
+                                   text="ann question", ts=NOW - 50, conn="conn-A"),
+            "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=2002, sender=2002, name="Bob",
+                                   text="bob question", ts=NOW - 40, conn="conn-B"),
+            "sys", now=NOW)
+        self.assertEqual(set(st["pending"]), {"1001", "2002"})
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 61), 2)
+        by_chat = {s["chat_id"]: s for s in self.sent}
+        self.assertEqual(set(by_chat), {"1001", "2002"})
+        self.assertEqual(by_chat["1001"]["business_connection_id"], "conn-A")
+        self.assertEqual(by_chat["2002"]["business_connection_id"], "conn-B")
+        ha = self.history("tg-1001")
+        hb = self.history("tg-2002")
+        self.assertEqual([m["role"] for m in ha], ["VISITOR", "SECRETARY"])
+        self.assertEqual([m["role"] for m in hb], ["VISITOR", "SECRETARY"])
+        self.assertIn("ann question", ha[0]["text"])
+        self.assertNotIn("bob question", ha[0]["text"])
+        self.assertIn("bob question", hb[0]["text"])
+        self.assertNotIn("ann question", hb[0]["text"])
+
+    def test_pi_prompts_never_cross_chats(self):
+        self.cfg.reply_delay_seconds = 60
+        st = self.mstate()
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=1001, name="Ann",
+                                   text="alpha bravo", ts=NOW - 50), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=2002, sender=2002, name="Bob",
+                                   text="charlie delta", ts=NOW - 40), "sys", now=NOW)
+        sb.process_due_replies(self.cfg, st, "sys", now=NOW + 61)
+        self.assertEqual(len(self.pi_cmds), 2)
+        prompts = [c[-1] for c in self.pi_cmds]
+        pa = next(x for x in prompts if "alpha bravo" in x)
+        pb = next(x for x in prompts if "charlie delta" in x)
+        self.assertNotIn("charlie delta", pa)
+        self.assertNotIn("alpha bravo", pb)
+
+    def test_owner_cancel_in_one_chat_leaves_other(self):
+        self.cfg.reply_delay_seconds = 60
+        st = self.mstate()
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=1001, name="Ann",
+                                   text="ann question", ts=NOW - 50), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=2002, sender=2002, name="Bob",
+                                   text="bob question", ts=NOW - 40), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=111, name="Alex",
+                                   text="I got this one", ts=NOW + 10), "sys", now=NOW + 10)
+        self.assertEqual(set(st["pending"]), {"2002"})
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 200), 1)
+        self.assertEqual([s["chat_id"] for s in self.sent], ["2002"])
+        roles_a = [m["role"] for m in self.history("tg-1001")]
+        self.assertEqual(roles_a, ["VISITOR", "OWNER"])
+        roles_b = [m["role"] for m in self.history("tg-2002")]
+        self.assertEqual(roles_b, ["VISITOR", "SECRETARY"])
+
+    def test_burst_in_one_chat_does_not_touch_other(self):
+        self.cfg.reply_delay_seconds = 60
+        st = self.mstate()
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=1001, name="Ann",
+                                   text="msg one", ts=NOW - 50, mid=1), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=2002, sender=2002, name="Bob",
+                                   text="bob q", ts=NOW - 45, mid=1), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(chat=1001, sender=1001, name="Ann",
+                                   text="msg two", ts=NOW - 20, mid=2), "sys", now=NOW + 30)
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 61), 1)
+        self.assertEqual([s["chat_id"] for s in self.sent], ["2002"])
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 91), 1)
+        self.assertEqual(sorted(s["chat_id"] for s in self.sent), ["1001", "2002"])
+        prompt_a = next(c[-1] for c in self.pi_cmds if "msg one" in c[-1])
+        self.assertIn("msg two", prompt_a)
+        self.assertNotIn("bob q", prompt_a)
+
 
 class TestRunLoop(Base):
     def test_dispatch_connection_message_edited_deleted(self):

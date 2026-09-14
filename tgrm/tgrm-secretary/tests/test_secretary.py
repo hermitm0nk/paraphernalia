@@ -60,9 +60,9 @@ class Base(unittest.TestCase):
         self.cfg.pi_thinking = "low"
         self.cfg.pi_timeout = 30
         self.cfg.owner_active_minutes = 0
+        self.cfg.reply_delay_seconds = 0
         self.cfg.poll_timeout = 5
         self.cfg.data_dir = self.tmp
-        self.cfg.allowed_chats = {"777"}
         self.cfg.owner_name = "Alex"
         self.cfg.system_prompt_file = os.path.join(
             os.path.dirname(__file__), "..", "SYSTEM.md")
@@ -72,7 +72,8 @@ class Base(unittest.TestCase):
         sb.api_call = self._real_api
 
     def state(self, owner=111, last_owner=0):
-        return {"owner_id": owner, "chats": {"777": {"last_owner_ts": last_owner}}}
+        return {"owner_id": owner, "chats": {"777": {"last_owner_ts": last_owner}},
+                "pending": {}}
 
     def history(self, slug="tg-777"):
         p = os.path.join(self.tmp, "chats", slug, "history.jsonl")
@@ -179,19 +180,6 @@ class TestQuietRules(Base):
         self.assertTrue(
             self.history()[-1]["text"].endswith("[non-text message]"))
 
-    def test_unknown_chat_skipped(self):
-        st = self.state(last_owner=NOW - 3600)
-        self.assertIsNone(sb.handle_business_message(
-            self.cfg, st, make_msg(chat=999, sender=999, ts=NOW - 60), ""))
-        self.assertEqual(self.pi_cmds, [])
-
-    def test_empty_allowlist_answers_nothing(self):
-        self.cfg.allowed_chats = set()
-        st = self.state(last_owner=NOW - 3600)
-        self.assertIsNone(sb.handle_business_message(
-            self.cfg, st, make_msg(ts=NOW - 60), ""))
-        self.assertEqual(self.pi_cmds, [])
-
 
 class TestHistoryHelpers(Base):
     def test_load_tail_bounds_messages_and_chars(self):
@@ -225,7 +213,7 @@ class TestHistoryHelpers(Base):
         with open(os.path.join(self.tmp, "state.json"), "w") as f:
             f.write("broken{")
         self.assertEqual(sb.load_state(self.tmp),
-                         {"owner_id": 0, "chats": {}})
+                         {"owner_id": 0, "chats": {}, "pending": {}})
 
     def test_system_prompt_names_owner_and_actors(self):
         sp = sb.build_system_prompt(self.cfg)
@@ -233,6 +221,73 @@ class TestHistoryHelpers(Base):
         self.assertNotIn("{OWNER}", sp)
         for actor in ["OWNER", "VISITOR", "SECRETARY"]:
             self.assertIn(actor, sp)
+
+class TestReplyDelay(Base):
+    def test_visitor_schedules_not_sends(self):
+        self.cfg.reply_delay_seconds = 120
+        st = self.state(last_owner=NOW - 3600)
+        self.assertIsNone(sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW - 60), "sys", now=NOW))
+        self.assertEqual(self.pi_cmds, [])
+        self.assertEqual(self.sent, [])
+        self.assertIn("777", st["pending"])
+        # history recorded even though nothing sent
+        self.assertEqual([m["role"] for m in self.history()], ["VISITOR"])
+
+    def test_due_reply_sends_after_wait(self):
+        self.cfg.reply_delay_seconds = 120
+        st = self.state(last_owner=NOW - 3600)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW - 60), "sys", now=NOW)
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 60), 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 121), 1)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual([m["role"] for m in self.history()],
+                         ["VISITOR", "SECRETARY"])
+
+    def test_owner_message_cancels_pending(self):
+        self.cfg.reply_delay_seconds = 120
+        st = self.state(last_owner=NOW - 3600)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW - 60), "sys", now=NOW)
+        self.assertIn("777", st["pending"])
+        sb.handle_business_message(
+            self.cfg, st,
+            make_msg(sender=111, name="Alex", text="I got this", ts=NOW + 10),
+            "sys", now=NOW + 10)
+        self.assertNotIn("777", st.get("pending", {}))
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 200), 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.pi_cmds, [])
+        # both turns kept in history even though bot stayed silent
+        self.assertEqual([m["role"] for m in self.history()],
+                         ["VISITOR", "OWNER"])
+
+    def test_burst_debounced_to_single_reply(self):
+        self.cfg.reply_delay_seconds = 120
+        st = self.state(last_owner=NOW - 3600)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW, text="one", mid=1), "sys", now=NOW)
+        sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW + 30, text="two", mid=2), "sys",
+            now=NOW + 30)
+        self.assertEqual(len(st["pending"]), 1)
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 121), 0)
+        self.assertEqual(sb.process_due_replies(self.cfg, st, "sys", now=NOW + 151), 1)
+        self.assertEqual(len(self.sent), 1)
+        prompt = self.pi_cmds[0][-1]
+        self.assertIn("one", prompt)
+        self.assertIn("two", prompt)
+
+    def test_skipped_messages_still_recorded(self):
+        self.cfg.reply_delay_seconds = 120
+        self.cfg.owner_active_minutes = 10
+        st = self.state(last_owner=NOW - 120)
+        self.assertIsNone(sb.handle_business_message(
+            self.cfg, st, make_msg(ts=NOW - 60), "sys", now=NOW))
+        self.assertEqual(self.pi_cmds, [])
+        self.assertEqual([m["role"] for m in self.history()], ["VISITOR"])
 
 
 class TestRunLoop(Base):

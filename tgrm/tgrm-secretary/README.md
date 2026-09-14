@@ -15,8 +15,17 @@ Python — no third-party packages.
    account's reply.
 
 Quiet rules: your own messages are never answered; anything you wrote after
-their message counts as handled; only allowlisted chats get replies
+their message counts as handled
 (`OWNER_ACTIVE_MINUTES` optionally extends the silence window).
+Every visitor message waits `REPLY_DELAY_SECONDS` (default 120); the reply
+goes out only if the last message in history is still the visitor's —
+if you answered in the meantime, the pending reply is cancelled.
+A burst of visitor messages gets one debounced reply over the full transcript.
+Which chats reach the bot is controlled in Telegram itself
+(profile → Edit → Chat Automation → Only selected chats).
+
+Every turn from every actor (OWNER / VISITOR / SECRETARY) is appended to
+`data/chats/<id>/history.jsonl` on arrival, even when no reply goes out.
 
 ## Setup
 
@@ -34,10 +43,6 @@ provider).
 cp .env.example .env   # then add your BOT_TOKEN (never commit .env)
 python3 secretary_bot.py
 ```
-
-4. With `ALLOWED_CHATS` empty the bot runs in learning mode: everything is
-   logged to `data/events.jsonl`, nothing is answered. Send a message in the
-   target chat, read its id from the log, set `ALLOWED_CHATS=<id>`, restart.
 
 ## Tests
 

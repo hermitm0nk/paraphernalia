@@ -43,8 +43,8 @@ class Config:
     pi_timeout = int(os.environ.get("PI_TIMEOUT", "120"))
     poll_timeout = int(os.environ.get("POLL_TIMEOUT", "50"))
     owner_active_minutes = int(os.environ.get("OWNER_ACTIVE_MINUTES", "0"))
+    reply_delay_seconds = int(os.environ.get("REPLY_DELAY_SECONDS", "120"))
     data_dir = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-    allowed_chats = {c.strip() for c in os.environ.get("ALLOWED_CHATS", "").split(",") if c.strip()}
     owner_name = os.environ.get("OWNER_NAME", "Alex")
     system_prompt_file = os.environ.get(
         "SYSTEM_PROMPT_FILE",
@@ -66,10 +66,13 @@ def load_state(data_dir):
     if os.path.exists(path):
         try:
             with open(path) as f:
-                return json.load(f)
+                state = json.load(f)
+                state.setdefault("chats", {})
+                state.setdefault("pending", {})
+                return state
         except (json.JSONDecodeError, OSError):
             pass
-    return {"owner_id": 0, "chats": {}}
+    return {"owner_id": 0, "chats": {}, "pending": {}}
 
 
 def save_state(data_dir, state):
@@ -181,7 +184,82 @@ def ask_pi(cfg, session_slug, tail, system_prompt):
     return reply or "(I have nothing to add to that.)"
 
 
-def handle_business_message(cfg, state, msg, system_prompt):
+def owner_active(cfg, state, chat_id, now):
+    """True when OWNER_ACTIVE_MINUTES suppresses replies in this chat."""
+    window = getattr(cfg, "owner_active_minutes", 0) or 0
+    if not window:
+        return False
+    last_owner = state.get("chats", {}).get(chat_id, {}).get("last_owner_ts", 0)
+    return bool(last_owner and (now - last_owner) < window * 60)
+
+
+def cancel_pending(cfg, state, chat_id, reason):
+    pending = state.setdefault("pending", {})
+    if chat_id in pending:
+        del pending[chat_id]
+        save_state(cfg.data_dir, state)
+        log(cfg.data_dir, {"type": "cancelled", "chat_id": chat_id,
+                           "reason": reason})
+
+
+def send_reply(cfg, state, chat_id, conn_id, system_prompt, now):
+    """Send-time gate + reply. History's last entry must be VISITOR.
+
+    All history is recorded regardless; this only decides whether a
+    SECRETARY reply goes out.
+    """
+    slug = "tg-" + chat_id
+    tail = load_tail(cfg.data_dir, slug)
+    if not tail or tail[-1].get("role") != "VISITOR":
+        log(cfg.data_dir, {"type": "incoming", "chat_id": chat_id,
+                           "skipped": "owner replied already"})
+        return None
+    if owner_active(cfg, state, chat_id, now):
+        log(cfg.data_dir, {"type": "incoming", "chat_id": chat_id,
+                           "skipped": "owner active"})
+        return None
+    reply = ask_pi(cfg, slug, tail, system_prompt)
+    append_history(cfg.data_dir, slug, "SECRETARY", reply, int(now))
+    log(cfg.data_dir, {"type": "incoming", "chat_id": chat_id,
+                       "reply": reply[:2000]})
+    if not conn_id:
+        log(cfg.data_dir, {"type": "error",
+                           "detail": "no business_connection_id, not sending"})
+        return None
+    res = api_call(cfg, "sendMessage", {
+        "chat_id": chat_id, "text": reply,
+        "business_connection_id": conn_id,
+    })
+    log(cfg.data_dir, {"type": "sent", "chat_id": chat_id,
+                       "ok": res.get("ok")})
+    return reply
+
+
+def process_due_replies(cfg, state, system_prompt, now=None):
+    """Send every pending reply whose wait has elapsed. Returns sent count."""
+    now = time.time() if now is None else now
+    pending = state.setdefault("pending", {})
+    due = sorted(cid for cid, p in pending.items()
+                 if now >= p.get("due", 0))
+    sent = 0
+    for chat_id in due:
+        item = pending.pop(chat_id, None)
+        if item is None:
+            continue
+        save_state(cfg.data_dir, state)
+        try:
+            if send_reply(cfg, state, chat_id, item.get("conn_id", ""),
+                          system_prompt, now):
+                sent += 1
+        except Exception as e:
+            log(cfg.data_dir, {"type": "handler_error",
+                               "detail": str(e)[:300]})
+    return sent
+
+
+def handle_business_message(cfg, state, msg, system_prompt, now=None):
+    now = time.time() if now is None else now
+    delay = getattr(cfg, "reply_delay_seconds", 0) or 0
     chat_id = str(msg["chat"]["id"])
     conn_id = msg.get("business_connection_id", "")
     text = msg.get("text", "")
@@ -205,58 +283,52 @@ def handle_business_message(cfg, state, msg, system_prompt):
         save_state(cfg.data_dir, state)
     slug = "tg-" + chat_id
     if is_owner:
-        # Your own message: into history as OWNER (so the bot sees the
-        # full dialogue), activity noted, never answered.
+        # Your own message: always into history, activity noted, any
+        # pending reply for this chat cancelled. Never answered.
         append_history(cfg.data_dir, slug, "OWNER",
                        "%s: %s" % (sender_name or cfg.owner_name, text or "[non-text message]"),
-                       msg_ts or int(time.time()))
-        note_owner_activity(cfg, state, chat_id, msg_ts or int(time.time()))
+                       msg_ts or int(now))
+        note_owner_activity(cfg, state, chat_id, msg_ts or int(now))
+        cancel_pending(cfg, state, chat_id, "owner replied")
         entry["skipped"] = "own message"
         log(cfg.data_dir, entry)
         return None
     if not text:
         append_history(cfg.data_dir, slug, "VISITOR",
                        "%s: [non-text message]" % (sender_name or "visitor"),
-                       msg_ts or int(time.time()))
+                       msg_ts or int(now))
         entry["skipped"] = "non-text message"
         log(cfg.data_dir, entry)
         return None
-    if chat_id not in cfg.allowed_chats:
-        entry["skipped"] = "chat not in ALLOWED_CHATS"
-        log(cfg.data_dir, entry)
-        return None
-    last_owner = state["chats"].get(chat_id, {}).get("last_owner_ts", 0)
+    # Visitor text: always recorded first — history is never dropped,
+    # even when no reply goes out.
+    append_history(cfg.data_dir, slug, "VISITOR",
+                     "%s: %s" % (sender_name or "visitor", text),
+                     msg_ts or int(now))
+    last_owner = state.get("chats", {}).get(chat_id, {}).get("last_owner_ts", 0)
     if last_owner and msg_ts and last_owner >= msg_ts:
         # You wrote in this chat after they sent this: you already handled it.
         entry["skipped"] = "owner replied already"
         log(cfg.data_dir, entry)
         return None
-    if (cfg.owner_active_minutes and last_owner
-            and (time.time() - last_owner) < cfg.owner_active_minutes * 60):
+    if owner_active(cfg, state, chat_id, now):
         # You're actively messaging right now: stay out of the way.
         # Disabled when OWNER_ACTIVE_MINUTES=0.
         entry["skipped"] = "owner active"
         log(cfg.data_dir, entry)
         return None
-
-    append_history(cfg.data_dir, slug, "VISITOR",
-                     "%s: %s" % (sender_name or "visitor", text),
-                     msg_ts or int(time.time()))
-    tail = load_tail(cfg.data_dir, slug)
-    reply = ask_pi(cfg, slug, tail, system_prompt)
-    append_history(cfg.data_dir, slug, "SECRETARY", reply, int(time.time()))
-    entry["reply"] = reply[:2000]
+    if delay <= 0:
+        return send_reply(cfg, state, chat_id, conn_id, system_prompt, now)
+    # Grace window: (re)schedule one reply per chat — each new visitor
+    # message pushes the due time out, so a burst gets a single answer
+    # over the full transcript.
+    pending = state.setdefault("pending", {})
+    pending[chat_id] = {"due": now + delay, "conn_id": conn_id,
+                        "visitor_ts": msg_ts or int(now)}
+    save_state(cfg.data_dir, state)
+    entry["scheduled"] = "reply in %ds" % delay
     log(cfg.data_dir, entry)
-
-    if not conn_id:
-        log(cfg.data_dir, {"type": "error", "detail": "no business_connection_id, not sending"})
-        return None
-    res = api_call(cfg, "sendMessage", {
-        "chat_id": chat_id, "text": reply,
-        "business_connection_id": conn_id,
-    })
-    log(cfg.data_dir, {"type": "sent", "chat_id": chat_id, "ok": res.get("ok")})
-    return reply
+    return None
 
 
 def run(cfg):
@@ -264,7 +336,7 @@ def run(cfg):
         sys.exit("BOT_TOKEN missing. Copy .env.example to .env and add your token.")
     system_prompt = build_system_prompt(cfg)
     state = load_state(cfg.data_dir)
-    log(cfg.data_dir, {"type": "start", "allowed_chats": sorted(cfg.allowed_chats) or "LEARNING (all logged, none answered)"})
+    log(cfg.data_dir, {"type": "start"})
     offset = 0
     backoff = 1
     while True:
@@ -304,6 +376,13 @@ def run(cfg):
                     log(cfg.data_dir, {"type": "handler_error", "detail": str(e)[:300]})
             elif "deleted_business_messages" in upd:
                 log(cfg.data_dir, {"type": "deleted", "chat_id": str(upd["deleted_business_messages"]["chat"]["id"])})
+        try:
+            process_due_replies(cfg, state, system_prompt)
+        except KeyboardInterrupt:
+            log(cfg.data_dir, {"type": "stop"})
+            return
+        except Exception as e:
+            log(cfg.data_dir, {"type": "handler_error", "detail": str(e)[:300]})
 
 
 if __name__ == "__main__":

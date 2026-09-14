@@ -1,0 +1,4 @@
+.worktrees/
+.env
+data/
+__pycache__/

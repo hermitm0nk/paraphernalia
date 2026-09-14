@@ -22,6 +22,15 @@ paraphernalia/
 ├── violentmonkey-scripts/
 │   ├── chatgpt-exporter.user.js
 │   └── middle-click-translate.user.js
+├── telegram-secretary/
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── README.md
+│   ├── SYSTEM.md
+│   ├── about.html
+│   ├── secretary_bot.py
+│   └── tests/
+│       └── test_secretary.py
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -110,6 +119,12 @@ Translates selected text when it is middle-clicked:
 - Uses Google's translation endpoint through `GM_xmlhttpRequest`
 
 [Install middle-click-translate.user.js](https://raw.githubusercontent.com/hermitm0nk/paraphernalia/master/violentmonkey-scripts/middle-click-translate.user.js)
+
+### telegram-secretary
+
+A Telegram Secretary Bot backend in stdlib-only Python, answered by the [pi.dev](https://pi.dev/) agent. Attach a Secretary-Mode bot to your Telegram account and it auto-replies in one allowlisted private chat as your friendly assistant, with quiet rules (never answers your own messages, defers to anything you already handled) and a full 3-actor transcript (owner / visitor / secretary) for context.
+
+See [telegram-secretary/README.md](telegram-secretary/README.md) for setup and configuration.
 
 ## License
 

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secretary Bot — research & implementation plan</title>
+<style>
+:root{
+  --nord0:#2E3440; --nord1:#3B4252; --nord2:#434C5E; --nord3:#4C566A;
+  --nord4:#D8DEE9; --nord5:#E5E9F0; --nord6:#ECEFF4;
+  --nord8:#88C0D0; --nord9:#81A1C1; --nord10:#5E81AC;
+  --nord11:#BF616A; --nord14:#A3BE8C;
+  --bg:var(--nord0); --panel:var(--nord1); --panel2:var(--nord2);
+  --ink:var(--nord4); --bright:var(--nord6);
+  --accent:var(--nord8); --good:var(--nord14); --bad:var(--nord11);
+  --border:1.5px solid var(--nord3);
+  --radius-panel:12px; --radius-row:8px;
+  --serif:ui-serif,Georgia,"Times New Roman",serif;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);padding:56px 24px 100px;-webkit-font-smoothing:antialiased}
+.page{max-width:1080px;margin:auto}
+.eyebrow,.label,.step-no{font:11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--nord4);opacity:.68}
+.tag{font:11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--nord5)}
+header{max-width:820px;margin-bottom:46px}
+.eyebrow{margin-bottom:12px}
+h1,h2,h3{font-family:var(--serif);font-weight:500;color:var(--bright);letter-spacing:-.01em}
+h1{font-size:clamp(36px,5vw,58px);line-height:1.08;margin-bottom:18px}
+h2{font-size:30px;line-height:1.2;margin-bottom:10px}
+h3{font-size:20px;line-height:1.25;margin-bottom:7px}
+p{max-width:760px;margin-bottom:14px}
+.lede{font-size:18px;color:var(--nord4);opacity:.75;max-width:700px}
+.meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}
+.tag{background:var(--panel2);color:var(--nord5);border-radius:999px;padding:4px 10px;letter-spacing:.04em}
+.layout{display:grid;grid-template-columns:190px minmax(0,1fr);gap:42px}
+aside{position:sticky;top:28px;align-self:start;border-top:var(--border);padding-top:14px}
+aside a{display:block;color:var(--ink);text-decoration:none;font:12px var(--mono);padding:6px 0}
+aside a:hover{color:var(--accent)}
+section{margin-bottom:62px;scroll-margin-top:28px}
+.sec-head{display:flex;gap:12px;align-items:baseline;margin-bottom:22px}
+.num{font:11px var(--mono);background:var(--panel2);border-radius:6px;padding:3px 8px;color:var(--bright)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.card{background:var(--panel);border:var(--border);border-radius:var(--radius-panel);padding:20px}
+.card.focus{border-left:4px solid var(--accent)}
+.card.good{border-left:4px solid var(--good)}
+.card.warn{border-left:4px solid var(--bad)}
+.card p:last-child{margin-bottom:0}
+.callout{background:rgba(136,192,208,.07);border-left:3px solid var(--accent);border-radius:var(--radius-row);padding:15px 17px;margin:20px 0}
+.callout strong{color:var(--bright)}
+.steps{display:grid;gap:12px}
+.step{display:grid;grid-template-columns:42px 1fr;gap:14px;align-items:start}
+.step-no{background:var(--accent);color:var(--nord0);width:30px;height:30px;border-radius:50%;display:grid;place-items:center;letter-spacing:0;opacity:1}
+.step-body{background:var(--panel);border:var(--border);border-radius:var(--radius-row);padding:15px 17px}
+.step-body p{margin:0;font-size:14px}
+.flow{background:var(--panel);border:var(--border);border-radius:var(--radius-panel);padding:20px;overflow:auto}
+.flow svg{display:block;min-width:650px;width:100%;height:auto}
+.flow text{font:12px var(--mono)}
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--panel);border:var(--border);border-radius:var(--radius-panel);overflow:hidden;font-size:14px}
+th,td{text-align:left;padding:13px 15px;border-bottom:1px solid var(--nord2);vertical-align:top}
+th{background:var(--panel2);font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--nord6)}
+tr:last-child td{border-bottom:0}
+code{font:13px var(--mono);background:var(--panel2);border-radius:5px;padding:2px 5px;color:var(--accent)}
+a{color:var(--accent)}
+ul{padding-left:20px;margin:8px 0 0}
+li{margin:5px 0}
+.source-list{display:grid;gap:9px}
+.source-list li{font-size:14px}
+.source-list a{text-underline-offset:3px}
+.foot{border-top:var(--border);padding-top:18px;color:var(--nord4);opacity:.68;font-size:13px}
+@media(max-width:820px){body{padding:34px 18px 70px}.layout{grid-template-columns:1fr}aside{display:none}.grid{grid-template-columns:1fr}section{margin-bottom:48px}}
+</style>
+</head>
+<body>
+<main class="page">
+<header>
+  <div class="eyebrow">Research brief · 14 September 2026</div>
+  <h1>Secretary Bot</h1>
+  <p class="lede">A Secretary Bot is a bot with Secretary Mode enabled, connected to your Telegram account so it can answer private messages on your behalf while you are away.[1]</p>
+  <div class="meta"><span class="tag">Secretary Mode</span><span class="tag">Chat Automation</span><span class="tag">Implementation plan</span></div>
+</header>
+<div class="layout">
+<aside aria-label="Contents"><div class="label">On this page</div><a href="#meaning">01 · What it is</a><a href="#differs">02 · Vs a regular bot</a><a href="#connect">03 · Connect it</a><a href="#plan">04 · Build plan</a><a href="#safety">05 · Safety</a><a href="#sources">06 · Sources</a></aside>
+<div>
+<section id="meaning"><div class="sec-head"><span class="num">01</span><h2>What a Secretary Bot is</h2></div>
+  <div class="grid"><article class="card focus"><h3>A mode, not a separate product</h3><p>Any bot can become a Secretary Bot: create it with <code>@BotFather</code>, open BotFather’s bot-management web app, and switch on Secretary Mode under Bot Settings → Mode Settings.[1] The bot is then eligible to be attached to your account.</p></article><article class="card good"><h3>Attached to your account, free</h3><p>You connect it in your own profile settings under Chat Automation — no Telegram Premium required. It previously lived behind the Premium-only Business Bots menu; Telegram has since made the connection free for everyone.[1]</p></article></div>
+  <div class="callout"><strong>Working definition for this project.</strong> The deliverable is a backend (or constructor logic) behind a Secretary-Mode bot attached to the owner’s account: it sees incoming DMs in the chats you allow, drafts or sends replies under your configured rules, and escalates anything it should not answer alone.</div>
+</section>
+<section id="differs"><div class="sec-head"><span class="num">02</span><h2>How it differs from a regular bot</h2></div>
+  <div class="card"><table><thead><tr><th></th><th>Regular bot</th><th>Secretary Bot</th></tr></thead><tbody><tr><td>Who it talks as</td><td>Itself — users open a chat with the bot.[5]</td><td>Your account side — it processes messages sent to you and can reply on your behalf.[1][2]</td></tr><tr><td>Where it operates</td><td>Its own chats, groups, channels.[5]</td><td>Your private chats — all of them or only selected ones (typically new chats and non-contacts).[1]</td></tr><tr><td>Setup</td><td>Token + backend, nothing on your account.</td><td>Secretary Mode on, plus per-account Chat Automation settings: accessible chats and bot permissions.[1]</td></tr><tr><td>Permissions</td><td>Normal Bot API limits.</td><td>You grant message-management rights explicitly; the documented minimum is the Manage Messages set.[1] Telegram’s API exposes the connection, recipient scope, and rights behind it.[4]</td></tr></tbody></table></div>
+</section>
+<section id="connect"><div class="sec-head"><span class="num">03</span><h2>Connect it to your account</h2></div>
+  <div class="steps"><div class="step"><div class="step-no">1</div><div class="step-body"><h3>Create the bot</h3><p>Message <code>@BotFather</code> with <code>/newbot</code>. An existing bot works too — just enable the mode on it — but a dedicated bot keeps secretary behavior separate from anything else.[1]</p></div></div><div class="step"><div class="step-no">2</div><div class="step-body"><h3>Enable Secretary Mode</h3><p>Open BotFather’s bot-management web app, pick the bot, and toggle Secretary Mode under Settings → Bot Settings → Mode Settings.[1]</p></div></div><div class="step"><div class="step-no">3</div><div class="step-body"><h3>Attach it in Chat Automation</h3><p>In your profile settings (Edit profile → Chat Automation), select the bot, then scope it: which chats it can access — normally only selected chats such as new chats and non-contacts — and which permissions it gets, starting from the Manage Messages minimum.[1]</p></div></div><div class="step"><div class="step-no">4</div><div class="step-body"><h3>Wire up the backend</h3><p>Register the bot’s token with your backend or bot constructor. The reply behavior — what it says and when — is defined there, not in Telegram settings.[1]</p></div></div><div class="step"><div class="step-no">5</div><div class="step-body"><h3>Define the behavior logic</h3><p>Start with suggested replies (drafts you approve) before full auto-reply: classify intent, pull in context such as buyer or member status, draft the answer, and let the owner approve, edit, or reject it.[2]</p></div></div></div>
+</section>
+<section id="plan"><div class="sec-head"><span class="num">04</span><h2>Implementation plan</h2></div>
+  <div class="flow" aria-label="Secretary bot request flow"><svg viewBox="0 0 900 190" role="img"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#4C566A"/></marker></defs><rect x="18" y="58" width="160" height="70" rx="10" fill="#434C5E"/><text x="98" y="88" text-anchor="middle" fill="#ECEFF4">Customer DM</text><text x="98" y="108" text-anchor="middle" fill="#D8DEE9">to your account</text><path d="M178 93H250" stroke="#4C566A" stroke-width="2" marker-end="url(#arrow)"/><rect x="252" y="58" width="178" height="70" rx="10" fill="#5E81AC"/><text x="341" y="88" text-anchor="middle" fill="#ECEFF4">Secretary bot</text><text x="341" y="108" text-anchor="middle" fill="#ECEFF4">intent + context</text><path d="M430 93H505" stroke="#4C566A" stroke-width="2" marker-end="url(#arrow)"/><rect x="507" y="28" width="170" height="56" rx="10" fill="#A3BE8C"/><text x="592" y="61" text-anchor="middle" fill="#2E3440">Draft reply</text><text x="592" y="77" text-anchor="middle" fill="#2E3440">owner approves</text><rect x="507" y="105" width="170" height="56" rx="10" fill="#434C5E" stroke="#4C566A"/><text x="592" y="138" text-anchor="middle" fill="#ECEFF4">Escalate to owner</text><path d="M592 84V105" stroke="#4C566A" stroke-width="2" marker-end="url(#arrow)"/><path d="M677 56H750" stroke="#4C566A" stroke-width="2" marker-end="url(#arrow)"/><rect x="752" y="58" width="130" height="70" rx="10" fill="#434C5E"/><text x="817" y="88" text-anchor="middle" fill="#ECEFF4">Reply sent</text><text x="817" y="108" text-anchor="middle" fill="#D8DEE9">as your account</text></svg></div>
+  <div class="grid" style="margin-top:16px"><article class="card"><h3>Milestone A · connection</h3><ul><li>Create the bot, enable Secretary Mode.</li><li>Attach it via Chat Automation with the narrowest chat scope.</li><li>Verify a test DM reaches the backend.</li><li>Log every incoming message and reply.</li></ul></article><article class="card"><h3>Milestone B · suggested replies</h3><ul><li>Classify intent: sales, support, renewal, FAQ, human-only.[2]</li><li>Attach buyer/member context to each draft.</li><li>Owner approves, edits, or rejects before anything sends.</li><li>Track which drafts get edited to improve prompts.</li></ul></article><article class="card"><h3>Milestone C · guarded automation</h3><ul><li>Auto-reply only to approved FAQ intents.</li><li>Everything else stays suggested or escalates.</li><li>Rate-limit replies; never double-answer one message.</li><li>Pause switch and full disconnect path tested.</li></ul></article><article class="card"><h3>Milestone D · production</h3><ul><li>Stable hosting with health checks and backups.</li><li>Retention and deletion policy for DM contents.</li><li>Review queue for escalations the owner must see.</li><li>Re-check Telegram’s official references — limits here change.[3][4]</li></ul></article></div>
+</section>
+<section id="safety"><div class="sec-head"><span class="num">05</span><h2>Constraints to settle before coding</h2></div>
+  <div class="card warn"><ul><li><strong>Scope:</strong> which chats may it touch — only new chats and non-contacts, or more? Default to the narrowest set.[1]</li><li><strong>Authority:</strong> grant the minimum Manage Messages rights; expand only with a reason.[1]</li><li><strong>Voice:</strong> suggested replies first — full auto-reply only for explicitly approved intents.[2]</li><li><strong>Escape hatch:</strong> pause and disconnect must work instantly from the owner’s side.</li><li><strong>Data:</strong> DMs are sensitive — define what is stored, for how long, and how the owner deletes it.</li></ul></div>
+</section>
+<section id="sources"><div class="sec-head"><span class="num">06</span><h2>Sources & guides</h2></div>
+  <ol class="source-list"><li>[1] <a href="https://docs.menubuilder.cc/books/2-basic-functions/page/secretary-bot-general-information">MenuBuilder docs — Secretary Bot general information</a> · what a Secretary Bot is, enabling Secretary Mode, attaching it via Chat Automation, chat scope and permissions.</li><li>[2] <a href="https://grambase.ai/blog/telegram-secretary-bots-commerce-guide-2026">GramBase — Telegram Secretary Bots for Creators and Businesses (2026)</a> · inbox-driven use cases, intent triage, and the suggested-replies-first approach.</li><li>[3] <a href="https://core.telegram.org/bots/features">Telegram Bot Features</a> · official guide to bot capabilities, including connected account bots.</li><li>[4] <a href="https://core.telegram.org/api/bots/connected-business-bots">Telegram API — Connected business bots</a> · official technical reference for connections, recipients, and rights.</li><li>[5] <a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a> · official answers on what regular bots receive and how updates work.</li></ol>
+</section>
+<footer class="foot">Prepared as an implementation starting point. Telegram’s automation features and limits change; check the linked references again when the bot is built.</footer>
+</div></div>
+</main>
+</body>
+</html>

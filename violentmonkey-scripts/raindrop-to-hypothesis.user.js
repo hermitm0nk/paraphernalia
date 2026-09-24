@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Raindrop → Hypothesis Highlight Exporter
 // @namespace    https://github.com/hermitm0nk/paraphernalia
-// @version      1.0.1
+// @version      1.1.0
 // @description  Export Raindrop.io highlights currently rendered on a page to Hypothesis-compatible JSON from the Violentmonkey menu.
 // @author       Hermit
 // @updateURL    https://raw.githubusercontent.com/hermitm0nk/paraphernalia/master/violentmonkey-scripts/raindrop-to-hypothesis.user.js
@@ -23,11 +23,9 @@
     const RAINDROP_STYLE_ID = /^rh-\d{10,}-?$/;
     const LEGACY_MARK_CLASS = /^rh-\d{10,}$/;
 
-    // Hypothesis's import UI groups annotations by `annotation.user` before it
-    // imports them. The importer does not preserve this source identity: the
-    // saved annotations are owned by the currently logged-in Hypothesis user.
-    // We therefore use a stable synthetic source identity solely to make the
-    // import-selection UI work and to label the batch clearly.
+    // Hypothesis's import UI groups imported annotations by `annotation.user`.
+    // This synthetic source identity is only for that UI; imported annotations
+    // are saved under the currently logged-in Hypothesis account.
     const IMPORT_SOURCE_USER = "acct:raindrop-import@raindrop.io";
     const IMPORT_SOURCE_USER_INFO = { display_name: "Raindrop import" };
 
@@ -43,7 +41,6 @@
                 throw new Error("Document body is not available yet.");
             }
 
-            const textIndex = buildRenderedTextIndex(root);
             const metadata = readRaindropMetadata();
             const metadataById = new Map(
                 metadata
@@ -51,11 +48,11 @@
                     .map((item) => [String(item._id), item]),
             );
 
-            let extracted = extractModernHighlights(textIndex, metadataById);
+            let extracted = extractModernHighlights(root, metadataById);
             let sourceMode = "css-custom-highlights";
 
             if (!extracted.length) {
-                extracted = extractLegacyMarks(textIndex, metadataById);
+                extracted = extractLegacyMarks(root, metadataById);
                 sourceMode = "legacy-mark-elements";
             }
 
@@ -70,36 +67,23 @@
             const extractedAt = new Date().toISOString();
             const annotations = unique.map((item, index) => ({
                 id: `raindrop-${item.raindropId || index}`,
-
-                // Required by Hypothesis's import-selection UI. This is only a
-                // source/import identity; Hypothesis replaces ownership when it
-                // saves the annotation under the currently logged-in account.
                 user: IMPORT_SOURCE_USER,
                 user_info: IMPORT_SOURCE_USER_INFO,
-
                 uri: location.href,
-                document: {
-                    title: [document.title],
-                },
+                document: { title: [document.title] },
                 text: item.note || "",
                 tags: [],
                 target: [
                     {
                         source: location.href,
-                        selector: [item.selector],
+                        selector: item.selectors,
                     },
                 ],
-
-                // Keep migrated annotations private. Hypothesis regenerates
-                // permissions for the current account during interactive import.
                 permissions: {
                     read: [],
                     update: [],
                     delete: [],
                 },
-
-                // Hypothesis ignores unknown fields on import. Keep the original
-                // Raindrop data in the file for migration provenance.
                 raindrop: {
                     id: item.raindropId,
                     color: item.color,
@@ -109,14 +93,9 @@
             }));
 
             const output = {
-                // Standard Hypothesis JSON-export wrapper fields. Only
-                // `annotations` is required by the parser, but these make the
-                // file structurally closer to a native Hypothesis export.
                 export_date: extractedAt,
                 export_userid: IMPORT_SOURCE_USER,
-                client_version: "raindrop-to-hypothesis-userscript/1.0.1",
-
-                // Migration metadata retained for humans/tools.
+                client_version: "raindrop-to-hypothesis-userscript/1.1.0",
                 source: "Raindrop.io live-page extraction",
                 source_mode: sourceMode,
                 source_url: location.href,
@@ -124,6 +103,7 @@
                 extracted_at: extractedAt,
                 annotation_count: annotations.length,
                 raindrop_metadata_accessible: metadata.length > 0,
+                selector_model: "Hypothesis RangeSelector + TextPositionSelector + TextQuoteSelector",
                 annotations,
             };
 
@@ -132,6 +112,7 @@
 
             console.group(`[Raindrop → Hypothesis] Exported ${annotations.length} highlights`);
             console.log("Extraction mode:", sourceMode);
+            console.log("Selector model: native Hypothesis HTML selector trio");
             console.log(
                 "Raindrop metadata:",
                 metadata.length ? `accessible (${metadata.length} records)` : "not accessible; notes may be absent",
@@ -140,9 +121,8 @@
                 unique.map((item, index) => ({
                     n: index + 1,
                     id: item.raindropId,
-                    text: item.selector.exact.slice(0, 100),
-                    prefix: item.selector.prefix || "",
-                    suffix: item.selector.suffix || "",
+                    text: quoteSelector(item.selectors).exact.slice(0, 100),
+                    selectors: item.selectors.map((selector) => selector.type).join(", "),
                     note: item.note,
                 })),
             );
@@ -154,8 +134,12 @@
         }
     }
 
-    // Match Hypothesis's TextQuoteSelector text representation closely:
-    // textContent with each <br> represented as one space.
+    function quoteSelector(selectors) {
+        return selectors.find((selector) => selector.type === "TextQuoteSelector") || { exact: "" };
+    }
+
+    // Hypothesis represents text inside a selector as DOM textContent, except
+    // that each <br> contributes one literal space.
     function renderedTextFromRange(range) {
         const container = document.createElement("div");
         container.appendChild(range.cloneContents());
@@ -165,102 +149,160 @@
         return container.textContent || "";
     }
 
-    // Build a rendered-text index without recursively touching arbitrary page
-    // objects. TreeWalker avoids Firefox security-wrapper failures seen on some
-    // extension-injected/custom nodes.
-    function buildRenderedTextIndex(root) {
-        const starts = new WeakMap();
-        const pieces = [];
-        let length = 0;
-        const rejectedTags = new Set([
-            "SCRIPT",
-            "STYLE",
-            "NOSCRIPT",
-            "TEXTAREA",
-            "OPTION",
-            "RDH-UI",
-        ]);
-
-        const walker = document.createTreeWalker(
-            root,
-            NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-            {
-                acceptNode(node) {
-                    try {
-                        if (node.nodeType === Node.TEXT_NODE) {
-                            return NodeFilter.FILTER_ACCEPT;
-                        }
-                        if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (rejectedTags.has(node.tagName)) {
-                                return NodeFilter.FILTER_REJECT;
-                            }
-                            if (node.getAttribute("contenteditable") === "true") {
-                                return NodeFilter.FILTER_REJECT;
-                            }
-                            return node.tagName === "BR"
-                                ? NodeFilter.FILTER_ACCEPT
-                                : NodeFilter.FILTER_SKIP;
-                        }
-                    } catch (_error) {
-                        return NodeFilter.FILTER_REJECT;
-                    }
-                    return NodeFilter.FILTER_SKIP;
-                },
-            },
-        );
-
-        let node;
-        while ((node = walker.nextNode())) {
-            try {
-                if (node.nodeType === Node.TEXT_NODE) {
-                    const text = node.nodeValue || "";
-                    starts.set(node, length);
-                    pieces.push(text);
-                    length += text.length;
-                } else if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "BR") {
-                    pieces.push(" ");
-                    length += 1;
-                }
-            } catch (_error) {
-                // Skip Firefox security-wrapped nodes.
-            }
-        }
-
-        return { text: pieces.join(""), starts, root };
-    }
-
-    function boundaryOffset(index, container, offset) {
+    // The following helpers intentionally mirror Hypothesis's current HTML
+    // anchoring implementation. In particular, TextPositionSelector offsets are
+    // UTF-16 offsets in document.body.textContent, not visual/rendered offsets.
+    function nodeTextLength(node) {
         try {
-            if (container.nodeType === Node.TEXT_NODE && index.starts.has(container)) {
-                return index.starts.get(container) + offset;
+            if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+                return (node.textContent || "").length;
             }
-
-            const range = document.createRange();
-            range.selectNodeContents(index.root);
-            range.setEnd(container, offset);
-            return renderedTextFromRange(range).length;
-        } catch (error) {
-            console.warn("[Raindrop → Hypothesis] Could not calculate range boundary offset:", error);
-            return null;
+        } catch (_error) {
+            // Security-wrapped nodes contribute no usable text here.
         }
+        return 0;
     }
 
-    function selectorFromRange(range, index) {
-        const exact = renderedTextFromRange(range);
-        const start = boundaryOffset(index, range.startContainer, range.startOffset);
-        const end = boundaryOffset(index, range.endContainer, range.endOffset);
-        const selector = { type: "TextQuoteSelector", exact };
-
-        if (start != null && end != null) {
-            selector.prefix = index.text.slice(Math.max(0, start - CONTEXT_LEN), start);
-            selector.suffix = index.text.slice(end, Math.min(index.text.length, end + CONTEXT_LEN));
+    function previousSiblingsTextLength(node) {
+        let sibling = node.previousSibling;
+        let length = 0;
+        while (sibling) {
+            length += nodeTextLength(sibling);
+            sibling = sibling.previousSibling;
         }
-
-        return selector;
+        return length;
     }
 
-    // Raindrop's UI keeps _id/text/note/color/position in rdh-ui.store. Firefox
-    // may hide this cross-extension state; anchoring does not depend on it.
+    function textPositionFromPoint(node, offset) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            if (!node.parentElement) {
+                throw new Error("Text node has no parent element");
+            }
+            return {
+                element: node.parentElement,
+                offset: previousSiblingsTextLength(node) + offset,
+            };
+        }
+
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            let textOffset = 0;
+            for (let i = 0; i < offset; i += 1) {
+                textOffset += nodeTextLength(node.childNodes[i]);
+            }
+            return { element: node, offset: textOffset };
+        }
+
+        throw new Error("Range boundary is not an element or text node");
+    }
+
+    function positionRelativeToRoot(position, root) {
+        let element = position.element;
+        let offset = position.offset;
+
+        while (element !== root) {
+            if (!element || !element.parentElement) {
+                throw new Error("Range boundary is outside document.body");
+            }
+            offset += previousSiblingsTextLength(element);
+            element = element.parentElement;
+        }
+
+        return offset;
+    }
+
+    function resolveRawOffset(root, targetOffset) {
+        const iterator = document.createNodeIterator(root, NodeFilter.SHOW_TEXT);
+        let node = iterator.nextNode();
+        let lastNode = null;
+        let consumed = 0;
+
+        while (node) {
+            const length = node.data.length;
+            if (consumed + length > targetOffset) {
+                return { node, offset: targetOffset - consumed };
+            }
+            lastNode = node;
+            consumed += length;
+            node = iterator.nextNode();
+        }
+
+        if (lastNode && consumed === targetOffset) {
+            return { node: lastNode, offset: lastNode.data.length };
+        }
+
+        throw new RangeError("Offset exceeds document.body text length");
+    }
+
+    function rangeFromRawOffsets(root, start, end) {
+        const startPoint = resolveRawOffset(root, start);
+        const endPoint = resolveRawOffset(root, end);
+        const range = document.createRange();
+        range.setStart(startPoint.node, startPoint.offset);
+        range.setEnd(endPoint.node, endPoint.offset);
+        return range;
+    }
+
+    function getNodePosition(node) {
+        let position = 0;
+        let current = node;
+        while (current) {
+            if (current.nodeName === node.nodeName) {
+                position += 1;
+            }
+            current = current.previousSibling;
+        }
+        return position;
+    }
+
+    function xpathFromNode(node, root) {
+        let xpath = "";
+        let current = node;
+
+        while (current !== root) {
+            if (!current) {
+                throw new Error("Node is not a descendant of document.body");
+            }
+            const name = current.nodeName.toLowerCase();
+            xpath = `${name}[${getNodePosition(current)}]/${xpath}`;
+            current = current.parentNode;
+        }
+
+        return (`/${xpath}`).replace(/\/$/, "");
+    }
+
+    function selectorsFromRange(range, root) {
+        const start = textPositionFromPoint(range.startContainer, range.startOffset);
+        const end = textPositionFromPoint(range.endContainer, range.endOffset);
+        const rawStart = positionRelativeToRoot(start, root);
+        const rawEnd = positionRelativeToRoot(end, root);
+
+        const rangeSelector = {
+            type: "RangeSelector",
+            startContainer: xpathFromNode(start.element, root),
+            startOffset: start.offset,
+            endContainer: xpathFromNode(end.element, root),
+            endOffset: end.offset,
+        };
+
+        const positionSelector = {
+            type: "TextPositionSelector",
+            start: rawStart,
+            end: rawEnd,
+        };
+
+        const rawTextLength = (root.textContent || "").length;
+        const prefixRange = rangeFromRawOffsets(root, Math.max(0, rawStart - CONTEXT_LEN), rawStart);
+        const suffixRange = rangeFromRawOffsets(root, rawEnd, Math.min(rawTextLength, rawEnd + CONTEXT_LEN));
+        const textQuoteSelector = {
+            type: "TextQuoteSelector",
+            exact: renderedTextFromRange(range),
+            prefix: renderedTextFromRange(prefixRange),
+            suffix: renderedTextFromRange(suffixRange),
+        };
+
+        return [rangeSelector, positionSelector, textQuoteSelector];
+    }
+
     function readRaindropMetadata() {
         try {
             const ui = document.querySelector("rdh-ui");
@@ -315,7 +357,7 @@
         return allNames.filter((name) => name.startsWith(`rh-${newestTimestamp}-`));
     }
 
-    function extractModernHighlights(textIndex, metadataById) {
+    function extractModernHighlights(root, metadataById) {
         const names = discoverModernHighlightNames();
         const extracted = [];
 
@@ -342,11 +384,11 @@
             try {
                 for (const range of highlight) {
                     try {
-                        const selector = selectorFromRange(range, textIndex);
-                        if (!selector.exact.trim()) {
+                        const selectors = selectorsFromRange(range, root);
+                        if (!quoteSelector(selectors).exact.trim()) {
                             continue;
                         }
-                        extracted.push(highlightRecord(raindropId, selector, metadata));
+                        extracted.push(highlightRecord(raindropId, selectors, metadata));
                     } catch (error) {
                         console.warn(`[Raindrop → Hypothesis] Failed to convert range ${raindropId}:`, error);
                     }
@@ -360,7 +402,7 @@
     }
 
     // Older Raindrop versions wrap highlight fragments in <mark> elements.
-    function extractLegacyMarks(textIndex, metadataById) {
+    function extractLegacyMarks(root, metadataById) {
         const groups = new Map();
         document.querySelectorAll('mark[class^="rh-"][data-id]').forEach((mark) => {
             try {
@@ -397,11 +439,11 @@
                         : endNode.childNodes.length,
                 );
 
-                const selector = selectorFromRange(range, textIndex);
-                if (!selector.exact.trim()) {
+                const selectors = selectorsFromRange(range, root);
+                if (!quoteSelector(selectors).exact.trim()) {
                     continue;
                 }
-                extracted.push(highlightRecord(raindropId, selector, metadataById.get(raindropId)));
+                extracted.push(highlightRecord(raindropId, selectors, metadataById.get(raindropId)));
             } catch (error) {
                 console.warn(`[Raindrop → Hypothesis] Could not extract legacy highlight ${raindropId}:`, error);
             }
@@ -410,14 +452,17 @@
         return extracted;
     }
 
-    function highlightRecord(raindropId, selector, metadata) {
+    function highlightRecord(raindropId, selectors, metadata) {
         return {
             raindropId,
-            selector,
+            selectors,
             note: metadata && typeof metadata.note === "string" ? metadata.note : "",
             color: metadata && typeof metadata.color === "string" ? metadata.color : null,
             position: metadata && typeof metadata.position === "number" ? metadata.position : null,
-            originalText: metadata && typeof metadata.text === "string" ? metadata.text : selector.exact,
+            originalText:
+                metadata && typeof metadata.text === "string"
+                    ? metadata.text
+                    : quoteSelector(selectors).exact,
         };
     }
 
@@ -426,11 +471,12 @@
         const seen = new Set();
 
         for (const item of items) {
+            const quote = quoteSelector(item.selectors);
             const key = JSON.stringify([
                 item.raindropId,
-                item.selector.exact,
-                item.selector.prefix || "",
-                item.selector.suffix || "",
+                quote.exact,
+                quote.prefix || "",
+                quote.suffix || "",
             ]);
             if (seen.has(key)) {
                 continue;

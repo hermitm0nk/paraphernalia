@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Raindrop → Hypothesis Highlight Exporter
 // @namespace    https://github.com/hermitm0nk/paraphernalia
-// @version      1.0.0
+// @version      1.0.1
 // @description  Export Raindrop.io highlights currently rendered on a page to Hypothesis-compatible JSON from the Violentmonkey menu.
 // @author       Hermit
 // @updateURL    https://raw.githubusercontent.com/hermitm0nk/paraphernalia/master/violentmonkey-scripts/raindrop-to-hypothesis.user.js
@@ -22,6 +22,14 @@
     const RAINDROP_HIGHLIGHT_NAME = /^rh-(\d{10,})-(.+)$/;
     const RAINDROP_STYLE_ID = /^rh-\d{10,}-?$/;
     const LEGACY_MARK_CLASS = /^rh-\d{10,}$/;
+
+    // Hypothesis's import UI groups annotations by `annotation.user` before it
+    // imports them. The importer does not preserve this source identity: the
+    // saved annotations are owned by the currently logged-in Hypothesis user.
+    // We therefore use a stable synthetic source identity solely to make the
+    // import-selection UI work and to label the batch clearly.
+    const IMPORT_SOURCE_USER = "acct:raindrop-import@raindrop.io";
+    const IMPORT_SOURCE_USER_INFO = { display_name: "Raindrop import" };
 
     GM_registerMenuCommand(COMMAND, exportRaindropHighlights, {
         id: "raindrop-to-hypothesis-export",
@@ -59,8 +67,16 @@
                 );
             }
 
+            const extractedAt = new Date().toISOString();
             const annotations = unique.map((item, index) => ({
                 id: `raindrop-${item.raindropId || index}`,
+
+                // Required by Hypothesis's import-selection UI. This is only a
+                // source/import identity; Hypothesis replaces ownership when it
+                // saves the annotation under the currently logged-in account.
+                user: IMPORT_SOURCE_USER,
+                user_info: IMPORT_SOURCE_USER_INFO,
+
                 uri: location.href,
                 document: {
                     title: [document.title],
@@ -73,16 +89,17 @@
                         selector: [item.selector],
                     },
                 ],
-                // An empty read list makes the imported annotation private.
-                // Hypothesis regenerates permissions for the current account/group
-                // during interactive import.
+
+                // Keep migrated annotations private. Hypothesis regenerates
+                // permissions for the current account during interactive import.
                 permissions: {
                     read: [],
                     update: [],
                     delete: [],
                 },
+
                 // Hypothesis ignores unknown fields on import. Keep the original
-                // Raindrop data in the export file as migration provenance.
+                // Raindrop data in the file for migration provenance.
                 raindrop: {
                     id: item.raindropId,
                     color: item.color,
@@ -92,19 +109,25 @@
             }));
 
             const output = {
+                // Standard Hypothesis JSON-export wrapper fields. Only
+                // `annotations` is required by the parser, but these make the
+                // file structurally closer to a native Hypothesis export.
+                export_date: extractedAt,
+                export_userid: IMPORT_SOURCE_USER,
+                client_version: "raindrop-to-hypothesis-userscript/1.0.1",
+
+                // Migration metadata retained for humans/tools.
                 source: "Raindrop.io live-page extraction",
                 source_mode: sourceMode,
                 source_url: location.href,
                 source_title: document.title,
-                extracted_at: new Date().toISOString(),
+                extracted_at: extractedAt,
                 annotation_count: annotations.length,
                 raindrop_metadata_accessible: metadata.length > 0,
                 annotations,
             };
 
-            // Useful for inspection before/after the download.
             window.__RAINDROP_HYPOTHESIS_EXPORT__ = output;
-
             downloadJSON(output);
 
             console.group(`[Raindrop → Hypothesis] Exported ${annotations.length} highlights`);
@@ -131,10 +154,8 @@
         }
     }
 
-    /**
-     * Match Hypothesis's TextQuoteSelector representation closely:
-     * DOM textContent with each <br> represented as one space.
-     */
+    // Match Hypothesis's TextQuoteSelector text representation closely:
+    // textContent with each <br> represented as one space.
     function renderedTextFromRange(range) {
         const container = document.createElement("div");
         container.appendChild(range.cloneContents());
@@ -144,17 +165,13 @@
         return container.textContent || "";
     }
 
-    /**
-     * Build a rendered-text index without recursively touching arbitrary page
-     * objects. TreeWalker is deliberately used here because Firefox can expose
-     * extension-injected/custom nodes through security wrappers that throw when
-     * recursively inspecting properties such as nodeType.
-     */
+    // Build a rendered-text index without recursively touching arbitrary page
+    // objects. TreeWalker avoids Firefox security-wrapper failures seen on some
+    // extension-injected/custom nodes.
     function buildRenderedTextIndex(root) {
         const starts = new WeakMap();
         const pieces = [];
         let length = 0;
-
         const rejectedTags = new Set([
             "SCRIPT",
             "STYLE",
@@ -173,24 +190,20 @@
                         if (node.nodeType === Node.TEXT_NODE) {
                             return NodeFilter.FILTER_ACCEPT;
                         }
-
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            const element = node;
-                            if (rejectedTags.has(element.tagName)) {
+                            if (rejectedTags.has(node.tagName)) {
                                 return NodeFilter.FILTER_REJECT;
                             }
-                            if (element.getAttribute("contenteditable") === "true") {
+                            if (node.getAttribute("contenteditable") === "true") {
                                 return NodeFilter.FILTER_REJECT;
                             }
-                            if (element.tagName === "BR") {
-                                return NodeFilter.FILTER_ACCEPT;
-                            }
-                            return NodeFilter.FILTER_SKIP;
+                            return node.tagName === "BR"
+                                ? NodeFilter.FILTER_ACCEPT
+                                : NodeFilter.FILTER_SKIP;
                         }
                     } catch (_error) {
                         return NodeFilter.FILTER_REJECT;
                     }
-
                     return NodeFilter.FILTER_SKIP;
                 },
             },
@@ -213,11 +226,7 @@
             }
         }
 
-        return {
-            text: pieces.join(""),
-            starts,
-            root,
-        };
+        return { text: pieces.join(""), starts, root };
     }
 
     function boundaryOffset(index, container, offset) {
@@ -226,8 +235,6 @@
                 return index.starts.get(container) + offset;
             }
 
-            // Fallback for element-level range boundaries. Raindrop normally
-            // resolves highlights to text-node boundaries, so this is uncommon.
             const range = document.createRange();
             range.selectNodeContents(index.root);
             range.setEnd(container, offset);
@@ -242,11 +249,7 @@
         const exact = renderedTextFromRange(range);
         const start = boundaryOffset(index, range.startContainer, range.startOffset);
         const end = boundaryOffset(index, range.endContainer, range.endOffset);
-
-        const selector = {
-            type: "TextQuoteSelector",
-            exact,
-        };
+        const selector = { type: "TextQuoteSelector", exact };
 
         if (start != null && end != null) {
             selector.prefix = index.text.slice(Math.max(0, start - CONTEXT_LEN), start);
@@ -256,12 +259,8 @@
         return selector;
     }
 
-    /**
-     * Raindrop's Svelte UI keeps the original highlight records (_id, text,
-     * note, color, position) on rdh-ui.store. Cross-extension isolation may hide
-     * the expando property in Firefox, so metadata is optional: anchoring does
-     * not depend on it.
-     */
+    // Raindrop's UI keeps _id/text/note/color/position in rdh-ui.store. Firefox
+    // may hide this cross-extension state; anchoring does not depend on it.
     function readRaindropMetadata() {
         try {
             const ui = document.querySelector("rdh-ui");
@@ -272,10 +271,8 @@
         }
     }
 
-    /**
-     * Current Raindrop versions paint highlights with the CSS Custom Highlight
-     * API using names of the form rh-<instance timestamp>-<Raindrop id>.
-     */
+    // Current Raindrop versions use CSS Custom Highlights named
+    // rh-<instance timestamp>-<Raindrop id>.
     function discoverModernHighlightNames() {
         const names = new Set();
 
@@ -288,12 +285,9 @@
                 }
             }
         } catch (_error) {
-            // Firefox may restrict registry enumeration across extension realms.
+            // Registry enumeration may be restricted across extension realms.
         }
 
-        // Raindrop also emits ::highlight(...) rules into style[id^="rh-"].
-        // Reading these gives us the names even if registry enumeration itself
-        // is unavailable.
         document.querySelectorAll('style[id^="rh-"]').forEach((style) => {
             try {
                 if (!RAINDROP_STYLE_ID.test(style.id)) {
@@ -313,15 +307,11 @@
             return [];
         }
 
-        // Extension reloads can leave stale registrations/styles behind. The
-        // timestamp is per Raindrop instance, so use only the newest namespace.
-        const newestTimestamp = Math.max(
-            ...allNames
-                .map((name) => RAINDROP_HIGHLIGHT_NAME.exec(name))
-                .filter(Boolean)
-                .map((match) => Number(match[1])),
-        );
-
+        const timestamps = allNames
+            .map((name) => RAINDROP_HIGHLIGHT_NAME.exec(name))
+            .filter(Boolean)
+            .map((match) => Number(match[1]));
+        const newestTimestamp = Math.max(...timestamps);
         return allNames.filter((name) => name.startsWith(`rh-${newestTimestamp}-`));
     }
 
@@ -341,7 +331,6 @@
                 console.warn(`[Raindrop → Hypothesis] Cannot access CSS highlight ${name}:`, error);
                 continue;
             }
-
             if (!highlight) {
                 continue;
             }
@@ -357,15 +346,7 @@
                         if (!selector.exact.trim()) {
                             continue;
                         }
-                        extracted.push({
-                            raindropId,
-                            selector,
-                            note: metadata && typeof metadata.note === "string" ? metadata.note : "",
-                            color: metadata && typeof metadata.color === "string" ? metadata.color : null,
-                            position: metadata && typeof metadata.position === "number" ? metadata.position : null,
-                            originalText:
-                                metadata && typeof metadata.text === "string" ? metadata.text : selector.exact,
-                        });
+                        extracted.push(highlightRecord(raindropId, selector, metadata));
                     } catch (error) {
                         console.warn(`[Raindrop → Hypothesis] Failed to convert range ${raindropId}:`, error);
                     }
@@ -378,15 +359,10 @@
         return extracted;
     }
 
-    /**
-     * Older Raindrop versions wrap highlight fragments in <mark> elements with
-     * a shared rh-<timestamp> class and data-id. Reconstruct one Range per id.
-     */
+    // Older Raindrop versions wrap highlight fragments in <mark> elements.
     function extractLegacyMarks(textIndex, metadataById) {
         const groups = new Map();
-        const marks = document.querySelectorAll('mark[class^="rh-"][data-id]');
-
-        marks.forEach((mark) => {
+        document.querySelectorAll('mark[class^="rh-"][data-id]').forEach((mark) => {
             try {
                 if (!LEGACY_MARK_CLASS.test(mark.className)) {
                     return;
@@ -422,26 +398,27 @@
                 );
 
                 const selector = selectorFromRange(range, textIndex);
-                const metadata = metadataById.get(raindropId);
-
                 if (!selector.exact.trim()) {
                     continue;
                 }
-
-                extracted.push({
-                    raindropId,
-                    selector,
-                    note: metadata && typeof metadata.note === "string" ? metadata.note : "",
-                    color: metadata && typeof metadata.color === "string" ? metadata.color : null,
-                    position: metadata && typeof metadata.position === "number" ? metadata.position : null,
-                    originalText: metadata && typeof metadata.text === "string" ? metadata.text : selector.exact,
-                });
+                extracted.push(highlightRecord(raindropId, selector, metadataById.get(raindropId)));
             } catch (error) {
                 console.warn(`[Raindrop → Hypothesis] Could not extract legacy highlight ${raindropId}:`, error);
             }
         }
 
         return extracted;
+    }
+
+    function highlightRecord(raindropId, selector, metadata) {
+        return {
+            raindropId,
+            selector,
+            note: metadata && typeof metadata.note === "string" ? metadata.note : "",
+            color: metadata && typeof metadata.color === "string" ? metadata.color : null,
+            position: metadata && typeof metadata.position === "number" ? metadata.position : null,
+            originalText: metadata && typeof metadata.text === "string" ? metadata.text : selector.exact,
+        };
     }
 
     function deduplicateHighlights(items) {
@@ -461,7 +438,6 @@
             seen.add(key);
             unique.push(item);
         }
-
         return unique;
     }
 
@@ -479,7 +455,6 @@
         document.documentElement.appendChild(anchor);
         anchor.click();
         anchor.remove();
-
         setTimeout(() => URL.revokeObjectURL(blobURL), 1000);
     }
 })();

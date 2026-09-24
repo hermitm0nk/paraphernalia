@@ -21,7 +21,8 @@ paraphernalia/
 │       └── main.lua
 ├── violentmonkey-scripts/
 │   ├── chatgpt-exporter.user.js
-│   └── middle-click-translate.user.js
+│   ├── middle-click-translate.user.js
+│   └── raindrop-to-hypothesis.user.js
 ├── tgrm/
 │   └── tgrm-secretary/
 │       ├── .env.example
@@ -92,7 +93,7 @@ See [koreader-plugins/README.md](koreader-plugins/README.md) for installation an
 
 ### violentmonkey-scripts
 
-Two browser userscripts for [Violentmonkey](https://violentmonkey.github.io/) and compatible userscript managers.
+Three browser userscripts for [Violentmonkey](https://violentmonkey.github.io/) and compatible userscript managers.
 
 #### `chatgpt-exporter.user.js`
 
@@ -120,6 +121,31 @@ Translates selected text when it is middle-clicked:
 - Uses Google's translation endpoint through `GM_xmlhttpRequest`
 
 [Install middle-click-translate.user.js](https://raw.githubusercontent.com/hermitm0nk/paraphernalia/master/violentmonkey-scripts/middle-click-translate.user.js)
+
+#### `raindrop-to-hypothesis.user.js`
+
+Exports Raindrop.io highlights that are currently rendered on the active page into JSON that can be imported by Hypothesis.
+
+Run **Export Raindrop highlights → Hypothesis JSON** from the Violentmonkey menu while Raindrop's highlights are visible. The userscript:
+
+- Reads Raindrop's current CSS Custom Highlight ranges directly from the live page instead of trying to re-find passages from exported text
+- Builds Hypothesis-compatible `TextQuoteSelector` objects with the exact quote plus 32 characters of prefix/suffix context
+- Falls back to Raindrop's older `<mark>`-element implementation when necessary
+- Attempts to preserve Raindrop notes, color, occurrence position, and highlight IDs when Firefox's extension isolation exposes that metadata
+- Keeps Raindrop migration metadata in ignored extra JSON fields for provenance
+- Marks generated annotations as private for Hypothesis's interactive importer
+- Runs only when explicitly selected from the Violentmonkey menu
+
+To migrate a page:
+
+1. Open the original page and make sure its Raindrop highlights are visible.
+2. Run the userscript command from the Violentmonkey menu.
+3. Keep the page open, activate Hypothesis, and choose **Share → Import**.
+4. Select the downloaded `raindrop-to-hypothesis-*.json` file.
+
+The script uses `@inject-into page` because the CSS Custom Highlight registry belongs to the page realm. On Firefox pages whose Content Security Policy blocks page-context userscript injection, the Violentmonkey command may not be available. Raindrop notes may also be absent from the export when Firefox prevents access to Raindrop's in-memory extension state; the highlight anchors themselves do not depend on that metadata.
+
+[Install raindrop-to-hypothesis.user.js](https://raw.githubusercontent.com/hermitm0nk/paraphernalia/master/violentmonkey-scripts/raindrop-to-hypothesis.user.js)
 
 ### tgrm-secretary
 
